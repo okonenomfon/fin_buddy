@@ -25,7 +25,7 @@ export default function Dashboard({ user }) {
   
   // Feature states
   const [bulkSms, setBulkSms] = useState('')
-  const [darkMode, setDarkMode] = useState(false)
+  const [darkMode, setDarkMode] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
   const [showBulkUpload, setShowBulkUpload] = useState(false)
