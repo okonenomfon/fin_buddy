@@ -1,0 +1,297 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import DashboardLayout from '@/components/DashboardLayout';
+import { transactionAPI, insightsAPI, goalsAPI, achievementsAPI } from '@/lib/api';
+import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend } from 'recharts';
+import { Plus, TrendingDown, TrendingUp, Wallet, Send, Award, Sparkles, Loader } from 'lucide-react';
+import { format } from 'date-fns';
+
+const COLORS = ['#1890ff', '#13c2c2', '#52c41a', '#faad14', '#f5222d', '#eb2f96', '#722ed1'];
+
+export default function DashboardPage() {
+  const [smsText, setSmsText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [stats, setStats] = useState<any>(null);
+  const [transactions, setTransactions] = useState<any[]>([]);
+  const [insight, setInsight] = useState('');
+  const [goals, setGoals] = useState<any[]>([]);
+  const [achievements, setAchievements] = useState<any[]>([]);
+  const [period, setPeriod] = useState('week');
+
+  useEffect(() => {
+    loadDashboardData();
+  }, [period]);
+
+  const loadDashboardData = async () => {
+    try {
+      const [statsRes, transRes, insightRes, goalsRes, achievementsRes] = await Promise.all([
+        transactionAPI.getStats(period),
+        transactionAPI.getAll({ limit: 10 }),
+        insightsAPI.get(),
+        goalsAPI.getAll(),
+        achievementsAPI.getAll(),
+      ]);
+
+      setStats(statsRes.data);
+      setTransactions(transRes.data);
+      setInsight(insightRes.data.insight);
+      setGoals(goalsRes.data.filter((g: any) => g.status === 'active'));
+      setAchievements(achievementsRes.data.slice(0, 3));
+    } catch (error) {
+      console.error('Failed to load dashboard data:', error);
+    }
+  };
+
+  const handleParseSMS = async () => {
+    if (!smsText.trim()) return;
+
+    setLoading(true);
+    try {
+      await transactionAPI.parseSMS(smsText);
+      setSmsText('');
+      loadDashboardData();
+      alert('✅ Transaction added successfully!');
+    } catch (error: any) {
+      alert('❌ ' + (error.response?.data?.error || 'Failed to parse SMS'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const categoryData = stats?.categoryBreakdown?.map((cat: any) => ({
+    name: cat.category.charAt(0).toUpperCase() + cat.category.slice(1),
+    value: cat.total,
+  })) || [];
+
+  const sampleSMS = [
+    "Debit: ₦2,500 POS at Shoprite. Bal: ₦12,000",
+    "Credit: ₦50,000 Salary Transfer. Bal: ₦62,000",
+    "Debit: ₦500 Airtime purchase MTN. Bal: ₦11,500"
+  ];
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6 animate-fade-in">
+        {/* Header */}
+        <div className="glass-card p-6">
+          <h1 className="text-3xl font-display font-bold mb-2">Dashboard</h1>
+          <p className="text-gray-400">Track your spending and reach your financial goals 🎯</p>
+        </div>
+
+        {/* AI Insight Card */}
+        {insight && (
+          <div className="glass-card p-6 bg-gradient-to-r from-primary-500/20 to-teal-500/20 border-primary-500/30">
+            <div className="flex items-start gap-3">
+              <Sparkles className="w-6 h-6 text-primary-400 mt-1 flex-shrink-0" />
+              <div>
+                <h3 className="font-semibold text-lg mb-1">AI Insight</h3>
+                <p className="text-gray-200">{insight}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Stats Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="stat-card">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <p className="text-gray-400 text-sm mb-1">Total Spent</p>
+                <h3 className="text-3xl font-bold text-red-400">
+                  ₦{stats?.totals?.total_spent?.toLocaleString() || '0'}
+                </h3>
+              </div>
+              <TrendingDown className="w-8 h-8 text-red-400" />
+            </div>
+            <p className="text-sm text-gray-400">{stats?.totals?.debit_count || 0} transactions</p>
+          </div>
+
+          <div className="stat-card">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <p className="text-gray-400 text-sm mb-1">Total Income</p>
+                <h3 className="text-3xl font-bold text-green-400">
+                  ₦{stats?.totals?.total_income?.toLocaleString() || '0'}
+                </h3>
+              </div>
+              <TrendingUp className="w-8 h-8 text-green-400" />
+            </div>
+            <p className="text-sm text-gray-400">{stats?.totals?.credit_count || 0} transactions</p>
+          </div>
+
+          <div className="stat-card">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <p className="text-gray-400 text-sm mb-1">Current Balance</p>
+                <h3 className="text-3xl font-bold text-primary-400">
+                  ₦{stats?.currentBalance?.toLocaleString() || '0'}
+                </h3>
+              </div>
+              <Wallet className="w-8 h-8 text-primary-400" />
+            </div>
+            <p className="text-sm text-gray-400">Last updated</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* SMS Parser */}
+          <div className="glass-card p-6">
+            <h3 className="text-xl font-bold mb-4">Add Transaction via SMS</h3>
+            <textarea
+              value={smsText}
+              onChange={(e) => setSmsText(e.target.value)}
+              placeholder="Paste your bank SMS here...&#10;Example: Debit: ₦2,500 POS at Shoprite. Bal: ₦12,000"
+              className="input-field w-full h-24 mb-4 resize-none text-black"
+            />
+            <button
+              onClick={handleParseSMS}
+              disabled={loading || !smsText.trim()}
+              className="btn-primary w-full"
+            >
+              {loading ? (
+                <div className="flex items-center justify-center">
+                  <Loader className="w-5 h-5 mr-2 animate-spin" />
+                  Parsing...
+                </div>
+              ) : (
+                <>
+                  <Send className="w-5 h-5 mr-2 inline" />
+                  Parse & Add Transaction
+                </>
+              )}
+            </button>
+
+            <div className="mt-4 pt-4 border-t border-white/10">
+              <p className="text-sm text-gray-400 mb-2">Try these examples:</p>
+              {sampleSMS.map((sms, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => setSmsText(sms)}
+                  className="text-xs text-primary-400 hover:text-primary-300 block mb-1"
+                >
+                  {sms}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Category Breakdown */}
+          <div className="glass-card p-6">
+            <h3 className="text-xl font-bold mb-4">Spending by Category</h3>
+            {categoryData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={250}>
+                <PieChart>
+                  <Pie
+                    data={categoryData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {categoryData.map((entry: any, index: number) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-64 flex items-center justify-center text-gray-400">
+                No spending data yet. Add your first transaction!
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Recent Transactions */}
+          <div className="glass-card p-6">
+            <h3 className="text-xl font-bold mb-4">Recent Transactions</h3>
+            <div className="space-y-3">
+              {transactions.length > 0 ? (
+                transactions.map((trans) => (
+                  <div key={trans.id} className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
+                    <div>
+                      <p className="font-semibold">{trans.vendor || trans.category}</p>
+                      <p className="text-xs text-gray-400">
+                        {format(new Date(trans.transaction_date), 'MMM dd, yyyy')}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className={`font-bold ${trans.type === 'debit' ? 'text-red-400' : 'text-green-400'}`}>
+                        {trans.type === 'debit' ? '-' : '+'}₦{trans.amount.toLocaleString()}
+                      </p>
+                      <span className="badge bg-primary-500/20 text-primary-400 text-xs">
+                        {trans.category}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-gray-400 text-center py-8">No transactions yet</p>
+              )}
+            </div>
+          </div>
+
+          {/* Goals & Achievements */}
+          <div className="space-y-6">
+            {/* Active Goals */}
+            <div className="glass-card p-6">
+              <h3 className="text-xl font-bold mb-4">Active Goals</h3>
+              {goals.length > 0 ? (
+                goals.slice(0, 2).map((goal) => {
+                  const progress = (goal.current_amount / goal.target_amount) * 100;
+                  return (
+                    <div key={goal.id} className="mb-4">
+                      <div className="flex justify-between mb-2">
+                        <span className="font-semibold">{goal.title}</span>
+                        <span className="text-sm text-gray-400">
+                          {progress.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-white/10 rounded-full h-2">
+                        <div
+                          className="bg-gradient-to-r from-primary-500 to-teal-500 h-2 rounded-full transition-all"
+                          style={{ width: `${Math.min(progress, 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">
+                        ₦{goal.current_amount.toLocaleString()} / ₦{goal.target_amount.toLocaleString()}
+                      </p>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="text-gray-400 text-center py-4">No active goals</p>
+              )}
+            </div>
+
+            {/* Recent Achievements */}
+            <div className="glass-card p-6">
+              <h3 className="text-xl font-bold mb-4">Recent Achievements</h3>
+              <div className="space-y-2">
+                {achievements.length > 0 ? (
+                  achievements.map((achievement) => (
+                    <div key={achievement.id} className="flex items-center gap-3 p-3 bg-yellow-500/10 rounded-xl">
+                      <Award className="w-8 h-8 text-yellow-400" />
+                      <div>
+                        <p className="font-semibold">{achievement.badge_name}</p>
+                        <p className="text-xs text-gray-400">{achievement.description}</p>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-gray-400 text-center py-4">Start tracking to earn badges!</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </DashboardLayout>
+  );
+}

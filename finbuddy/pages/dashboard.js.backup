@@ -1,0 +1,248 @@
+import { useState, useEffect } from 'react'
+import Head from 'next/head'
+import { motion } from 'framer-motion'
+import { PieChart, Pie, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts'
+import { TrendingDown, TrendingUp, Wallet, MessageSquare, Target, Upload, LogOut } from 'lucide-react'
+import Link from 'next/link'
+import { useRouter } from 'next/router'
+import axios from 'axios'
+import Navigation from '../components/Navigation'
+
+export default function Dashboard({ user }) {
+  const router = useRouter()
+  const [stats, setStats] = useState(null)
+  const [insight, setInsight] = useState('')
+  const [smsText, setSmsText] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+
+  useEffect(() => {
+    if (!token) {
+      router.push('/login')
+      return
+    }
+    fetchStats()
+    fetchInsights()
+  }, [])
+
+  const fetchStats = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/transactions/stats`, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      setStats(response.data)
+    } catch (error) {
+      console.error('Failed to fetch stats:', error)
+    }
+  }
+
+  const fetchInsights = async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/insights`, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      setInsight(response.data.insight)
+    } catch (error) {
+      console.error('Failed to fetch insights:', error)
+    }
+  }
+
+  const handleParseSMS = async (e) => {
+    e.preventDefault()
+    setLoading(true)
+    try {
+      await axios.post(
+        `${API_URL}/api/transactions/parse-sms`,
+        { smsText },
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      setSmsText('')
+      fetchStats()
+      fetchInsights()
+      alert('✅ Transaction added successfully!')
+    } catch (error) {
+      alert('❌ Failed to parse SMS')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const COLORS = ['#2dd4bf', '#14b8a6', '#0d9488', '#0f766e', '#115e59', '#134e4a']
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <Head>
+        <title>Dashboard - FinBuddy</title>
+      </Head>
+
+      <Navigation user={user} />
+
+      <main className="container mx-auto px-4 py-8 max-w-7xl">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8"
+        >
+          <h1 className="text-4xl font-bold text-gray-800 mb-2">
+            Welcome back, {user?.name}! 👋
+          </h1>
+          <p className="text-gray-600">Here's your financial overview</p>
+        </motion.div>
+
+        {/* Stats Cards */}
+        <div className="grid md:grid-cols-3 gap-6 mb-8">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.1 }}
+            className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-3xl p-6 text-white shadow-lg"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <Wallet size={32} />
+              <span className="text-sm bg-white/20 px-3 py-1 rounded-full">Balance</span>
+            </div>
+            <h3 className="text-3xl font-bold mb-1">
+              ₦{stats?.currentBalance?.toLocaleString() || '0'}
+            </h3>
+            <p className="text-blue-100 text-sm">Current balance</p>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.2 }}
+            className="bg-gradient-to-br from-red-500 to-red-600 rounded-3xl p-6 text-white shadow-lg"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <TrendingDown size={32} />
+              <span className="text-sm bg-white/20 px-3 py-1 rounded-full">Spending</span>
+            </div>
+            <h3 className="text-3xl font-bold mb-1">
+              ₦{stats?.totalSpending?.toLocaleString() || '0'}
+            </h3>
+            <p className="text-red-100 text-sm">Total spending</p>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.3 }}
+            className="bg-gradient-to-br from-teal-500 to-teal-600 rounded-3xl p-6 text-white shadow-lg"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <TrendingUp size={32} />
+              <span className="text-sm bg-white/20 px-3 py-1 rounded-full">Income</span>
+            </div>
+            <h3 className="text-3xl font-bold mb-1">
+              ₦{stats?.totalIncome?.toLocaleString() || '0'}
+            </h3>
+            <p className="text-teal-100 text-sm">Total income</p>
+          </motion.div>
+        </div>
+
+        {/* AI Insight Card */}
+        {insight && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="glass-dark rounded-3xl p-6 mb-8 gradient-bg"
+          >
+            <h2 className="text-xl font-bold text-white mb-3 flex items-center gap-2">
+              <MessageSquare className="text-teal-400" />
+              AI Insights
+            </h2>
+            <p className="text-white/90 leading-relaxed">{insight}</p>
+          </motion.div>
+        )}
+
+        {/* SMS Parser */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white rounded-3xl p-6 shadow-lg mb-8"
+        >
+          <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <Upload className="text-teal-500" />
+            Add Transaction (SMS)
+          </h2>
+          <form onSubmit={handleParseSMS} className="space-y-4">
+            <textarea
+              value={smsText}
+              onChange={(e) => setSmsText(e.target.value)}
+              placeholder="Paste your bank SMS here...&#10;Example: Debit: ₦2,500 POS at Shoprite. Bal: ₦12,000."
+              className="w-full border-2 border-gray-200 rounded-xl p-4 focus:border-teal-500 focus:outline-none min-h-[100px] text-black"
+              required
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-teal-500 hover:bg-teal-600 text-white px-6 py-3 rounded-xl font-semibold transition-all transform hover:scale-105 disabled:opacity-50 btn-ripple"
+            >
+              {loading ? 'Processing...' : '🤖 Parse with AI'}
+            </button>
+          </form>
+        </motion.div>
+
+        {/* Charts */}
+        <div className="grid md:grid-cols-2 gap-8">
+          {/* Category Spending */}
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="bg-white rounded-3xl p-6 shadow-lg"
+          >
+            <h2 className="text-2xl font-bold text-gray-800 mb-6">Spending by Category</h2>
+            {stats?.categoryStats?.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie
+                    data={stats.categoryStats}
+                    dataKey="total"
+                    nameKey="category"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={100}
+                    label={(entry) => `${entry.category}: ₦${entry.total.toLocaleString()}`}
+                  >
+                    {stats.categoryStats.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-gray-500 text-center py-20">No data yet. Add some transactions!</p>
+            )}
+          </motion.div>
+
+          {/* Weekly Trends */}
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="bg-white rounded-3xl p-6 shadow-lg"
+          >
+            <h2 className="text-2xl font-bold text-gray-800 mb-6">Weekly Trends</h2>
+            {stats?.weeklySpending?.length > 0 ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={[...stats.weeklySpending].reverse()}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="week_start" tick={{ fontSize: 12 }} />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="spending" fill="#ef4444" name="Spending" />
+                  <Bar dataKey="income" fill="#14b8a6" name="Income" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="text-gray-500 text-center py-20">No data yet. Add some transactions!</p>
+            )}
+          </motion.div>
+        </div>
+      </main>
+    </div>
+  )
+}

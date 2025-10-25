@@ -1,0 +1,661 @@
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const Database = require('better-sqlite3');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const OpenAI = require('openai');
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Initialize OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY || 'demo-key',
+});
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Initialize SQLite Database
+const db = new Database(process.env.DATABASE_PATH || './backend/finbuddy.db');
+
+// Create tables
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    amount REAL NOT NULL,
+    category TEXT,
+    vendor TEXT,
+    balance REAL,
+    sms_text TEXT,
+    date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+  );
+
+  CREATE TABLE IF NOT EXISTS savings_goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    target_amount REAL NOT NULL,
+    current_amount REAL DEFAULT 0,
+    deadline DATE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+  );
+
+  CREATE TABLE IF NOT EXISTS badges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    badge_name TEXT NOT NULL,
+    badge_type TEXT NOT NULL,
+    earned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+  );
+
+  CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users (id)
+  );
+`);
+
+// Authentication middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access denied' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// Auth Routes
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    const stmt = db.prepare('INSERT INTO users (email, password, name) VALUES (?, ?, ?)');
+    const result = stmt.run(email, hashedPassword, name);
+    
+    const token = jwt.sign(
+      { id: result.lastInsertRowid, email },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      token,
+      user: { id: result.lastInsertRowid, email, name }
+    });
+  } catch (error) {
+    console.error('Signup error:', error);
+    res.status(400).json({ error: 'Email already exists' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      token,
+      user: { id: user.id, email: user.email, name: user.name }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+//transaction
+app.post('/api/transactions/parse-sms', authenticateToken, async (req, res) => {
+  try {
+    const { smsText } = req.body;
+    const userId = req.user.id;
+
+    // Regex-based parsing as fallback
+    let parsed = {
+      type: smsText.toLowerCase().includes('debit') ? 'debit' : 'credit',  // Changed to lowercase
+      amount: parseFloat(smsText.match(/[\d,]+\.?\d*/)?.[0]?.replace(/,/g, '') || 0),
+      category: 'other',
+      vendor: 'Unknown',
+      balance: null
+    };
+
+    // Extract balance
+    const balMatch = smsText.match(/bal:?\s*[₦$]?[\d,]+\.?\d*/i);
+    if (balMatch) {
+      parsed.balance = parseFloat(balMatch[0].match(/[\d,]+\.?\d*/)[0].replace(/,/g, ''));
+    }
+
+    // Extract vendor
+    const vendorMatch = smsText.match(/(?:at|from)\s+([a-zA-Z\s]+)/i);
+    if (vendorMatch) {
+      parsed.vendor = vendorMatch[1].trim();
+    }
+
+    // Categorize based on keywords
+    const text = smsText.toLowerCase();
+    if (text.includes('shoprite') || text.includes('food') || text.includes('restaurant')) {
+      parsed.category = 'food';
+    } else if (text.includes('uber') || text.includes('taxi') || text.includes('transport')) {
+      parsed.category = 'transport';
+    } else if (text.includes('airtime') || text.includes('data')) {
+      parsed.category = 'airtime';
+    }
+
+    // Try OpenAI if available
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'demo-key') {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: `Extract transaction details from SMS. Return JSON: {type, amount, category, vendor, balance}. Type must be lowercase: "debit" or "credit".`
+            },
+            { role: "user", content: smsText }
+          ],
+          temperature: 0.3,
+        });
+        parsed = JSON.parse(completion.choices[0].message.content);
+        // Ensure lowercase for database constraint
+        if (parsed.type) {
+          parsed.type = parsed.type.toLowerCase();
+        }
+      } catch (aiError) {
+        console.log('Using regex parsing');
+      }
+    }
+    
+    const stmt = db.prepare(`
+      INSERT INTO transactions (user_id, type, amount, category, vendor, balance, sms_text)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    const result = stmt.run(
+      userId,
+      parsed.type,
+      parsed.amount,
+      parsed.category || 'other',
+      parsed.vendor || 'Unknown',
+      parsed.balance || null,
+      smsText
+    );
+
+    res.json({ id: result.lastInsertRowid, ...parsed, smsText });
+  } catch (error) {
+    console.error('SMS parsing error:', error);
+    res.status(500).json({ error: 'Failed to parse SMS' });
+  }
+});
+
+app.get('/api/transactions', authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { limit = 50, offset = 0 } = req.query;
+    
+    const transactions = db.prepare(`
+      SELECT * FROM transactions 
+      WHERE user_id = ? 
+      ORDER BY date DESC 
+      LIMIT ? OFFSET ?
+    `).all(userId, parseInt(limit), parseInt(offset));
+
+    res.json(transactions);
+  } catch (error) {
+    console.error('Get transactions error:', error);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+app.get('/api/transactions/stats', authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log('📊 Fetching stats for user:', userId);
+    
+    // Get spending by category
+    const categoryStats = db.prepare(`
+      SELECT category, SUM(amount) as total, COUNT(*) as count
+      FROM transactions
+      WHERE user_id = ? AND type = 'debit'
+      GROUP BY category
+    `).all(userId);
+
+    // Get ALL TIME total spending and income (not just this week)
+    const totals = db.prepare(`
+      SELECT 
+        SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END) as total_spending,
+        SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END) as total_income
+      FROM transactions
+      WHERE user_id = ?
+    `).get(userId);
+
+    // Get weekly spending for chart (last 8 weeks)
+    const weeklySpending = db.prepare(`
+      SELECT 
+        strftime('%Y-%W', date) as week,
+        SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END) as spending,
+        SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END) as income
+      FROM transactions
+      WHERE user_id = ? AND date >= datetime('now', '-8 weeks')
+      GROUP BY week
+      ORDER BY week DESC
+    `).all(userId);
+
+    // Get current balance (from latest transaction)
+    const latestTransaction = db.prepare(`
+      SELECT balance FROM transactions
+      WHERE user_id = ? AND balance IS NOT NULL
+      ORDER BY date DESC LIMIT 1
+    `).get(userId);
+
+    console.log('✅ Category stats:', categoryStats);
+    console.log('✅ Totals:', totals);
+    console.log('✅ Weekly spending:', weeklySpending);
+    console.log('✅ Latest balance:', latestTransaction);
+
+    res.json({
+      categoryStats,
+      weeklySpending,
+      currentBalance: latestTransaction?.balance || 0,
+      totalSpending: totals?.total_spending || 0,
+      totalIncome: totals?.total_income || 0
+    });
+    
+  } catch (error) {
+    console.error('❌ Get stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch statistics', details: error.message });
+  }
+});
+
+// AI Insights
+app.get('/api/insights', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const transactions = db.prepare(`
+      SELECT * FROM transactions 
+      WHERE user_id = ? 
+      ORDER BY date DESC 
+      LIMIT 20
+    `).all(userId);
+
+    const categoryStats = db.prepare(`
+      SELECT category, SUM(amount) as total
+      FROM transactions
+      WHERE user_id = ? AND type = 'Debit'
+      GROUP BY category
+    `).all(userId);
+
+    let insight = "Great job tracking your finances! 💰 Keep monitoring your spending to stay on budget. 🎯";
+
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'demo-key') {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: "Financial advisor. Brief, motivational insights. Use emojis. Under 100 words."
+            },
+            {
+              role: "user",
+              content: `Analyze: ${JSON.stringify(transactions.slice(0, 10))}, ${JSON.stringify(categoryStats)}`
+            }
+          ],
+          temperature: 0.7,
+        });
+        insight = completion.choices[0].message.content;
+      } catch (aiError) {
+        console.log('Using default insight');
+      }
+    }
+
+    res.json({
+      insight,
+      categoryStats,
+      totalTransactions: transactions.length
+    });
+  } catch (error) {
+    console.error('Get insights error:', error);
+    res.status(500).json({ error: 'Failed to generate insights' });
+  }
+});
+
+// Chatbot
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  try {
+    const { message } = req.body;
+    const userId = req.user.id;
+
+    // Save user message
+    db.prepare('INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)').run(
+      userId, 'user', message
+    );
+
+    // Get user's financial data
+    const transactions = db.prepare(`
+      SELECT * FROM transactions 
+      WHERE user_id = ? 
+      ORDER BY date DESC 
+      LIMIT 20
+    `).all(userId);
+
+    const categoryStats = db.prepare(`
+      SELECT category, SUM(amount) as total, COUNT(*) as count
+      FROM transactions
+      WHERE user_id = ? AND type = 'debit'
+      GROUP BY category
+    `).all(userId);
+
+    // Calculate totals
+    const totals = db.prepare(`
+      SELECT 
+        SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END) as total_spending,
+        SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END) as total_income
+      FROM transactions
+      WHERE user_id = ?
+    `).get(userId);
+
+    let response = "I'm here to help with your finances! 💰 Ask me about your spending, savings, or financial tips. 🎯";
+
+    // Check if OpenAI is configured
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'demo-key') {
+      try {
+        const history = db.prepare(`
+          SELECT role, content FROM chat_history
+          WHERE user_id = ?
+          ORDER BY timestamp DESC
+          LIMIT 10
+        `).all(userId).reverse();
+
+        // Build context-rich prompt
+        const contextMessage = `
+User's Financial Summary:
+- Total Spending: ₦${totals?.total_spending || 0}
+- Total Income: ₦${totals?.total_income || 0}
+- Number of transactions: ${transactions.length}
+- Spending by category: ${JSON.stringify(categoryStats)}
+- Recent transactions: ${JSON.stringify(transactions.slice(0, 5))}
+
+Answer the user's question based on this data. Be specific with numbers and categories.
+`;
+
+        const messages = [
+          {
+            role: "system",
+            content: `You are FinBuddy, a friendly AI financial assistant. ${contextMessage}`
+          },
+          ...history.map(h => ({ role: h.role, content: h.content }))
+        ];
+
+        console.log('🤖 Sending to OpenAI with context:', contextMessage);
+
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages,
+          temperature: 0.7,
+        });
+
+        response = completion.choices[0].message.content;
+        console.log('✅ AI Response:', response);
+
+      } catch (aiError) {
+        console.error('OpenAI error:', aiError);
+        
+        // Fallback: Generate response without AI
+        if (message.toLowerCase().includes('spending') || message.toLowerCase().includes('spent')) {
+          response = `Based on your transactions, you've spent a total of ₦${totals?.total_spending?.toLocaleString() || 0}! 💰\n\n`;
+          
+          if (categoryStats.length > 0) {
+            response += "Here's the breakdown:\n";
+            categoryStats.forEach(cat => {
+              response += `• ${cat.category}: ₦${cat.total.toLocaleString()} (${cat.count} transactions)\n`;
+            });
+          }
+          
+          const topCategory = categoryStats.reduce((max, cat) => 
+            cat.total > (max?.total || 0) ? cat : max, null);
+          
+          if (topCategory) {
+            response += `\nYour biggest expense is ${topCategory.category} at ₦${topCategory.total.toLocaleString()}! 📊`;
+          }
+        } else if (message.toLowerCase().includes('income')) {
+          response = `You've earned a total of ₦${totals?.total_income?.toLocaleString() || 0}! 💵`;
+        } else {
+          response = `You have ${transactions.length} transactions. Total spending: ₦${totals?.total_spending?.toLocaleString() || 0}, Total income: ₦${totals?.total_income?.toLocaleString() || 0}. Ask me specific questions about your finances! 😊`;
+        }
+      }
+    } else {
+      // No OpenAI key - use rule-based responses
+      console.log('⚠️ No OpenAI key, using fallback');
+      
+      if (message.toLowerCase().includes('spending') || message.toLowerCase().includes('spent') || message.toLowerCase().includes('spend')) {
+        response = `You've spent a total of ₦${totals?.total_spending?.toLocaleString() || 0}! 💰\n\n`;
+        
+        if (categoryStats.length > 0) {
+          response += "Breakdown by category:\n";
+          categoryStats.forEach(cat => {
+            response += `• ${cat.category}: ₦${cat.total.toLocaleString()}\n`;
+          });
+        }
+      } else if (message.toLowerCase().includes('income') || message.toLowerCase().includes('earned')) {
+        response = `Your total income is ₦${totals?.total_income?.toLocaleString() || 0}! 💵`;
+      } else if (message.toLowerCase().includes('balance')) {
+        const latest = db.prepare(`
+          SELECT balance FROM transactions
+          WHERE user_id = ? AND balance IS NOT NULL
+          ORDER BY date DESC LIMIT 1
+        `).get(userId);
+        response = `Your current balance is ₦${latest?.balance?.toLocaleString() || 0}! 💰`;
+      } else {
+        response = `📊 Quick Summary:\n• Total Spending: ₦${totals?.total_spending?.toLocaleString() || 0}\n• Total Income: ₦${totals?.total_income?.toLocaleString() || 0}\n• Transactions: ${transactions.length}\n\nAsk me: "How much did I spend?" or "What's my balance?" 😊`;
+      }
+    }
+
+    // Save assistant response
+    db.prepare('INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)').run(
+      userId, 'assistant', response
+    );
+
+    res.json({ response });
+    
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ error: 'Chat failed' });
+  }
+});
+
+// Goals
+app.post('/api/goals', authenticateToken, (req, res) => {
+  try {
+    const { title, targetAmount, deadline } = req.body;
+    const userId = req.user.id;
+
+    const stmt = db.prepare(`
+      INSERT INTO savings_goals (user_id, title, target_amount, deadline)
+      VALUES (?, ?, ?, ?)
+    `);
+    
+    const result = stmt.run(userId, title, targetAmount, deadline);
+
+    res.json({
+      id: result.lastInsertRowid,
+      title,
+      targetAmount,
+      currentAmount: 0,
+      deadline
+    });
+  } catch (error) {
+    console.error('Create goal error:', error);
+    res.status(500).json({ error: 'Failed to create goal' });
+  }
+});
+
+app.get('/api/goals', authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const goals = db.prepare(`
+      SELECT * FROM savings_goals 
+      WHERE user_id = ? 
+      ORDER BY created_at DESC
+    `).all(userId);
+
+    res.json(goals);
+  } catch (error) {
+    console.error('Get goals error:', error);
+    res.status(500).json({ error: 'Failed to fetch goals' });
+  }
+});
+
+app.patch('/api/goals/:id', authenticateToken, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { currentAmount } = req.body;
+    const userId = req.user.id;
+
+    db.prepare(`
+      UPDATE savings_goals 
+      SET current_amount = ? 
+      WHERE id = ? AND user_id = ?
+    `).run(currentAmount, id, userId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update goal error:', error);
+    res.status(500).json({ error: 'Failed to update goal' });
+  }
+});
+
+// Badges
+app.get('/api/badges', authenticateToken, (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const badges = db.prepare(`
+      SELECT * FROM badges 
+      WHERE user_id = ? 
+      ORDER BY earned_at DESC
+    `).all(userId);
+
+    res.json(badges);
+  } catch (error) {
+    console.error('Get badges error:', error);
+    res.status(500).json({ error: 'Failed to fetch badges' });
+  }
+});
+
+// Suggestions
+app.get('/api/suggestions', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const transactions = db.prepare(`
+      SELECT * FROM transactions 
+      WHERE user_id = ? AND type = 'Debit'
+      ORDER BY date DESC 
+      LIMIT 30
+    `).all(userId);
+
+    let suggestions = "💡 Try setting a daily spending limit\n💰 Save 10% of any income\n🎯 Track every purchase for better insights";
+
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'demo-key') {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: "Financial advisor. 2-3 micro-savings tips. Specific and motivational. Use emojis."
+            },
+            {
+              role: "user",
+              content: `Recent spending: ${JSON.stringify(transactions.slice(0, 10))}`
+            }
+          ],
+          temperature: 0.7,
+        });
+        suggestions = completion.choices[0].message.content;
+      } catch (aiError) {
+        console.log('Using default suggestions');
+      }
+    }
+
+    res.json({ suggestions });
+  } catch (error) {
+    console.error('Get suggestions error:', error);
+    res.status(500).json({ error: 'Failed to generate suggestions' });
+  }
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', message: 'FinBuddy API is running' });
+});
+
+// Root route - API info
+app.get('/', (req, res) => {
+  res.json({
+    name: 'FinBuddy API',
+    version: '1.0.0',
+    status: 'running',
+    message: '🚀 FinBuddy Backend API is running successfully!',
+    endpoints: {
+      health: '/api/health',
+      auth: '/api/auth/login, /api/auth/signup',
+      transactions: '/api/transactions',
+      chat: '/api/chat',
+      goals: '/api/goals',
+      insights: '/api/insights'
+    },
+    frontend: 'http://localhost:3000'
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ FinBuddy API running on http://localhost:${PORT}`);
+});
+
+module.exports = app;
