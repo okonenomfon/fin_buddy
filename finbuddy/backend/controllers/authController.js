@@ -5,7 +5,7 @@ const db = require('../config/database');
 exports.signup = async (req, res) => {
   const { email, password, name } = req.body;
   const hashedPassword = await bcrypt.hash(password, 10);
-  const badges = JSON.stringify(['Newbie']); // Initial Gamification Badge
+  const badges = JSON.stringify(['Newbie']);
   
   db.run(`INSERT INTO users (email, password, name, badges) VALUES (?, ?, ?, ?)`, 
     [email, hashedPassword, name, badges], 

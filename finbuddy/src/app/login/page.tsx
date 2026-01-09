@@ -22,12 +22,11 @@ export default function Login() {
     try {
       const res = await axios.post(`http://localhost:5000${endpoint}`, payload);
       if (res.data.token) {
-        // Save token (basic implementation)
         localStorage.setItem('token', res.data.token);
-        localStorage.setItem('userId', res.data.user.id); // For the MVP dashboard
-        router.push('/'); // Redirect to Dashboard
+        localStorage.setItem('userId', res.data.user.id);
+        router.push('/');
       } else if (!isLogin) {
-        setIsLogin(true); // Switch to login after signup
+        setIsLogin(true);
         alert('Account created! Please login.');
       }
     } catch (err: any) {

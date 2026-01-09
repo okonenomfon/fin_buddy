@@ -14,21 +14,18 @@ ChartJS.register(ArcElement, Tooltip, Legend);
 // Inside src/app/page.tsx
 
 export default function Dashboard() {
-  // 1. CHANGE THIS: Start with null, not 1
   const [userId, setUserId] = useState<string | null>(null); 
   const [data, setData] = useState({ transactions: [], goals: [] });
-  const router = useRouter(); // Add import { useRouter } from 'next/navigation'; at top
+  const router = useRouter();
 
-  // 2. CHANGE THIS: Check Login on load
   useEffect(() => {
     const token = localStorage.getItem('token');
     const storedId = localStorage.getItem('userId');
 
     if (!token || !storedId) {
-      router.push('/login'); // Kick them out if not logged in
+      router.push('/login');
     } else {
       setUserId(storedId);
-      // Fetch data only after we have the ID
       fetchData(storedId); 
     }
   }, []);
